@@ -16,8 +16,12 @@ load_dotenv()
 REDIS_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
+# Simple color theme
+PRIMARY_COLOR = Fore.GREEN
+USERNAME_COLOR = Fore.WHITE
+
 if not REDIS_URL or not REDIS_TOKEN:
-    print(Fore.RED + "Error: Missing UPSTASH credentials in .env file")
+    print(PRIMARY_COLOR + "Error: Missing UPSTASH credentials in .env file")
     exit(1)
 
 CHAT_KEY = "chat:messages"
@@ -32,6 +36,7 @@ class RedisChat:
         self.username = None
         self.running = True
         self.message_counter = 0
+        
         
     def redis_request(self, command, args=None):
         """Make HTTP request to Upstash Redis REST API"""
@@ -51,10 +56,10 @@ class RedisChat:
             if response.status_code == 200:
                 return response.json()
             else:
-                print(Fore.RED + f"Redis error: {response.status_code} - {response.text}")
+                print(PRIMARY_COLOR + f"Redis error: {response.status_code} - {response.text}")
                 return None
         except Exception as e:
-            print(Fore.RED + f"Connection error: {e}")
+            print(PRIMARY_COLOR + f"Connection error: {e}")
             return None
     
     def send_message(self, message):
@@ -70,9 +75,9 @@ class RedisChat:
         result = self.redis_request("LPUSH", [CHAT_KEY, msg_json])
         
         if result:
-            print(Fore.GREEN + f"✓ Message sent")
+            print(PRIMARY_COLOR + "✓ Message sent")
         else:
-            print(Fore.RED + "✗ Failed to send message")
+            print(PRIMARY_COLOR + "✗ Failed to send message")
     
     def get_message_history(self, count=10):
         """Get chat history from Redis"""
@@ -95,24 +100,24 @@ class RedisChat:
         message = msg.get("message", "")
         timestamp = msg.get("timestamp", "")
         
-        print(f"{Fore.CYAN}[{timestamp}] {Fore.YELLOW}{username}{Style.RESET_ALL}: {message}")
+        print(f"{PRIMARY_COLOR}[{timestamp}] {USERNAME_COLOR}{username}{PRIMARY_COLOR}: {message}")
     
     def show_history(self):
         """Display chat history"""
-        print(Fore.MAGENTA + "\n" + "="*60)
-        print(Fore.MAGENTA + "Chat History (Latest 20 messages)")
-        print(Fore.MAGENTA + "="*60)
+        print(PRIMARY_COLOR + "\n" + "="*60)
+        print(PRIMARY_COLOR + "Chat History (Latest 20 messages)")
+        print(PRIMARY_COLOR + "="*60)
         
         messages = self.get_message_history(20)
         
         if not messages:
-            print(Fore.YELLOW + "No messages yet. Be the first to chat!")
+            print(PRIMARY_COLOR + "No messages yet. Be the first to chat!")
         else:
             # Reverse to show oldest first
             for msg in reversed(messages):
                 self.display_message(msg)
         
-        print(Fore.MAGENTA + "="*60 + "\n")
+        print(PRIMARY_COLOR + "="*60 + "\n")
     
     def stream_updates(self):
         """Background thread to check for new messages"""
@@ -131,16 +136,16 @@ class RedisChat:
                         messages = self.get_message_history(new_messages_count)
                         
                         if messages:
-                            print(Fore.CYAN + f"\n--- New message(s) received ---")
+                            print(PRIMARY_COLOR + "\n--- New message(s) received ---")
                             for msg in messages:
                                 self.display_message(msg)
-                            print(Fore.GREEN + ">>> ", end="", flush=True)
+                            print(PRIMARY_COLOR + ">>> ", end="", flush=True)
                         
                         last_count = current_count
                 
                 time.sleep(1)  # Check for new messages every second
             except Exception as e:
-                print(Fore.RED + f"Stream error: {e}")
+                print(PRIMARY_COLOR + f"Stream error: {e}")
                 time.sleep(2)
     
     def start_stream_thread(self):
@@ -151,49 +156,49 @@ class RedisChat:
     def get_username(self):
         """Get username from user"""
         while True:
-            username = input(Fore.CYAN + "Enter your username: ").strip()
+            username = input(PRIMARY_COLOR + "Enter your username: ").strip()
             if username and len(username) <= 20:
                 self.username = username
-                print(Fore.GREEN + f"Welcome, {Fore.YELLOW}{username}{Fore.GREEN}!")
+                print(PRIMARY_COLOR + f"Welcome, {USERNAME_COLOR}{username}{PRIMARY_COLOR}!")
                 break
             else:
-                print(Fore.RED + "Username must be 1-20 characters")
+                print(PRIMARY_COLOR + "Username must be 1-20 characters")
     
     def show_help(self):
         """Display help menu"""
-        print(Fore.MAGENTA + "\n" + "="*60)
-        print(Fore.MAGENTA + "Commands:")
-        print(Fore.MAGENTA + "="*60)
-        print(f"{Fore.YELLOW}/history{Style.RESET_ALL}  - Show chat history")
-        print(f"{Fore.YELLOW}/help{Style.RESET_ALL}     - Show this help menu")
-        print(f"{Fore.YELLOW}/quit{Style.RESET_ALL}     - Exit the chat")
-        print(f"{Fore.YELLOW}Any text{Style.RESET_ALL}   - Send a message")
-        print(Fore.MAGENTA + "="*60 + "\n")
+        print(PRIMARY_COLOR + "\n" + "="*60)
+        print(PRIMARY_COLOR + "Commands:")
+        print(PRIMARY_COLOR + "="*60)
+        print(f"{PRIMARY_COLOR}/history  - Show chat history")
+        print(f"{PRIMARY_COLOR}/help     - Show this help menu")
+        print(f"{PRIMARY_COLOR}/quit     - Exit the chat")
+        print(f"{PRIMARY_COLOR}Any text   - Send a message")
+        print(PRIMARY_COLOR + "="*60 + "\n")
     
     def run(self):
         """Main chat loop"""
-        print(Fore.CYAN + "="*60)
-        print(Fore.CYAN + "Welcome to Redis Chat CLI!")
-        print(Fore.CYAN + "="*60 + "\n")
+        print(PRIMARY_COLOR + "="*60)
+        print(PRIMARY_COLOR + "Welcome to Redis Chat CLI!")
+        print(PRIMARY_COLOR + "="*60 + "\n")
         
         self.get_username()
         self.start_stream_thread()
         self.show_history()
         self.show_help()
         
-        print(Fore.GREEN + "Connected! Type your message or /help for commands\n")
+        print(PRIMARY_COLOR + "Connected! Type your message or /help for commands\n")
         
         try:
             while self.running:
                 try:
-                    message = input(Fore.GREEN + ">>> ").strip()
+                    message = input(PRIMARY_COLOR + ">>> ").strip()
                     
                     if not message:
                         continue
                     
                     if message.lower() == "/quit":
                         self.running = False
-                        print(Fore.YELLOW + "Goodbye!")
+                        print(PRIMARY_COLOR + "Goodbye!")
                         break
                     elif message.lower() == "/help":
                         self.show_help()
@@ -204,11 +209,11 @@ class RedisChat:
                 
                 except KeyboardInterrupt:
                     self.running = False
-                    print(Fore.YELLOW + "\nGoodbye!")
+                    print(PRIMARY_COLOR + "\nGoodbye!")
                     break
         
         except Exception as e:
-            print(Fore.RED + f"Error: {e}")
+            print(PRIMARY_COLOR + f"Error: {e}")
         
         self.running = False
 
