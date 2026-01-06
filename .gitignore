@@ -49,5 +49,5 @@ htmlcov/
 Thumbs.db
 .DS_Store
 
-# Keep .env for sharing credentials
-# .env is intentionally NOT ignored
+# Credentials
+

@@ -3,29 +3,107 @@ import requests
 import json
 import time
 import threading
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from colorama import Fore, Style, init
+import ctypes
+import platform
+
+def enable_vt_processing():
+    """Enable VT100 emulation on Windows"""
+    if platform.system() == "Windows":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            # Get current mode
+            hStdOut = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_ulong()
+            kernel32.GetConsoleMode(hStdOut, ctypes.byref(mode))
+            # Set mode
+            mode.value |= 0x0004
+            kernel32.SetConsoleMode(hStdOut, mode)
+        except:
+            pass
+
+enable_vt_processing()
+
+try:
+    from plyer import notification
+    PLYER_AVAILABLE = True
+except ImportError:
+    PLYER_AVAILABLE = False
+
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    
+# Windows ANSI Fix
+os.system('')
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.styles import Style as PromptStyle
+    from prompt_toolkit import print_formatted_text
+    from prompt_toolkit.formatted_text import ANSI
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
 
 # Initialize colorama
-init(autoreset=True)
+# Initialize colorama
+# strip=False ensures we send raw ANSI codes which prompt_toolkit/Windows Terminal can handle
+init(autoreset=True, strip=False)
 
 # Load environment variables
 load_dotenv()
 
 REDIS_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_AVAILABLE and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # Simple color theme
 PRIMARY_COLOR = Fore.GREEN
 USERNAME_COLOR = Fore.WHITE
+MENTION_COLOR = Fore.YELLOW
+SILENT_COLOR = Fore.MAGENTA
+ERROR_COLOR = Fore.RED
 
 if not REDIS_URL or not REDIS_TOKEN:
     print(PRIMARY_COLOR + "Error: Missing UPSTASH credentials in .env file")
     exit(1)
 
 CHAT_KEY = "chat:messages"
-LAST_SEEN_KEY = "chat:last_seen"
+USERS_KEY = "chat:users"
+
+# Custom Completer for @mentions
+class UserCompleter(Completer):
+    def __init__(self, get_users_func):
+        self.get_users_func = get_users_func
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        word = text.split(' ')[-1]
+        
+        if word.startswith('@'):
+            search = word[1:].lower()
+            users = self.get_users_func()
+            for user in users:
+                if user.lower().startswith(search):
+                    yield Completion(
+                        f"@{user}", 
+                        start_position=-len(word),
+                        display=f"@{user}",
+                        style="class:mention"
+                    )
 
 class RedisChat:
     def __init__(self):
@@ -36,7 +114,34 @@ class RedisChat:
         self.username = None
         self.running = True
         self.message_counter = 0
+        self.known_users = set()
+        self.users_lock = threading.Lock()
         
+    def update_known_users(self, users_list=None):
+        if users_list:
+            with self.users_lock:
+                self.known_users.update(users_list)
+                
+    def get_known_users(self):
+        with self.users_lock:
+            # Always include 'everyone'
+            full_list = {'everyone'} | self.known_users
+            # Exclude self if possible, but for mentions self is okay
+            return list(full_list)
+
+    def register_user(self):
+        """Add self to active users list"""
+        if self.username:
+            self.redis_request("SADD", [USERS_KEY, self.username])
+        
+    def is_window_focused(self):
+        """Check if the terminal window is in foreground"""
+        try:
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd == 0: return False
+            return hwnd == ctypes.windll.user32.GetForegroundWindow()
+        except:
+            return False
         
     def redis_request(self, command, args=None):
         """Make HTTP request to Upstash Redis REST API"""
@@ -63,21 +168,46 @@ class RedisChat:
             return None
     
     def send_message(self, message):
-        """Send a message to the chat"""
+        """Send a message to the chat handling mentions and silent mode"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Parse for /silent and recipients
+        recipients = []
+        is_silent = False
+        display_text = message
+        
+        # formatting mentions and checking for silent
+        if "/silent" in message:
+            is_silent = True
+            display_text = message.replace("/silent", "").strip()
+            # If silent, whoever is mentioned is a recipient
+            # We assume mentions are in the format @username
+            matches = re.findall(r'@(\w+)', message)
+            if matches:
+                 recipients = matches
+            else:
+                # /silent used but no mentions? Maybe just warn user or treat as private note to self?
+                # For now let's assume it's private to self if no mentions
+                pass
+
         msg_data = {
             "username": self.username,
-            "message": message,
-            "timestamp": timestamp
+            "message": display_text,
+            "timestamp": timestamp,
+            "recipients": recipients if is_silent else [],
+            "is_silent": is_silent
         }
         
         msg_json = json.dumps(msg_data)
         result = self.redis_request("LPUSH", [CHAT_KEY, msg_json])
         
         if result:
-            print(PRIMARY_COLOR + "✓ Message sent")
+            if is_silent:
+                print(SILENT_COLOR + "✓ Silent message sent")
+            else:
+                print(PRIMARY_COLOR + "✓ Message sent")
         else:
-            print(PRIMARY_COLOR + "✗ Failed to send message")
+            print(ERROR_COLOR + "✗ Failed to send message")
     
     def get_message_history(self, count=10):
         """Get chat history from Redis"""
@@ -99,8 +229,42 @@ class RedisChat:
         username = msg.get("username", "Unknown")
         message = msg.get("message", "")
         timestamp = msg.get("timestamp", "")
+        recipients = msg.get("recipients", [])
+        is_silent = msg.get("is_silent", False)
         
-        print(f"{PRIMARY_COLOR}[{timestamp}] {USERNAME_COLOR}{username}{PRIMARY_COLOR}: {message}")
+        # VISIBILITY CHECK
+        # If silent, only show if I am the sender OR I am in recipients
+        if is_silent:
+            if self.username != username and self.username not in recipients:
+                return
+
+        # Formatting
+        display_prefix = ""
+        user_color = USERNAME_COLOR
+        msg_color = PRIMARY_COLOR # Default message color (Green)
+
+        if is_silent:
+            display_prefix = f"{SILENT_COLOR}[SILENT] "
+            msg_color = SILENT_COLOR # Silent messages in Magenta
+
+        # Highlight mentions in the message body
+        # logic: replace @MyName with colored version
+        if self.username:
+            # Highlight @everyone
+            if "@everyone" in message:
+                message = message.replace("@everyone", f"{MENTION_COLOR}@everyone{msg_color}")
+            
+            # Highlight my name
+            pattern = re.compile(re.escape(f"@{self.username}"), re.IGNORECASE)
+            if pattern.search(message):
+                 message = pattern.sub(f"{MENTION_COLOR}@{self.username}{msg_color}", message)
+
+        final_str = f"{PRIMARY_COLOR}[{timestamp}] {display_prefix}{user_color}{username}{PRIMARY_COLOR}: {msg_color}{message}"
+        
+        if PROMPT_TOOLKIT_AVAILABLE:
+            print_formatted_text(ANSI(final_str))
+        else:
+            print(final_str)
     
     def show_history(self):
         """Display chat history"""
@@ -121,7 +285,8 @@ class RedisChat:
     
     def stream_updates(self):
         """Background thread to check for new messages"""
-        last_count = 0
+        # self.last_count is now initialized in run()
+        pass
         
         while self.running:
             try:
@@ -130,19 +295,94 @@ class RedisChat:
                 if result and result.get("result") is not None:
                     current_count = result["result"]
                     
+                    # If this is the first run loop, just sync the count and don't fetch/notify
+                    # BUT handling this in run() is safer. If we still rely on local last_count=0 
+                    # there is a race if run() logic fails.
+                    # We will assume self.last_count is initialized in run().
+                    
                     # If new messages arrived, show them
-                    if current_count > last_count:
-                        new_messages_count = current_count - last_count
+                    if current_count > self.last_count:
+                        new_messages_count = current_count - self.last_count
                         messages = self.get_message_history(new_messages_count)
                         
                         if messages:
-                            print(PRIMARY_COLOR + "\n--- New message(s) received ---")
+                            if not PROMPT_TOOLKIT_AVAILABLE:
+                                print(PRIMARY_COLOR + "\n--- New message(s) received ---")
+                            else:
+                                print_formatted_text(ANSI(f"{PRIMARY_COLOR}\n--- New message(s) received ---"))
+                            
+                            # Check if we should notify (background & not own message)
+                            if PLYER_AVAILABLE and not self.is_window_focused():
+                                # Filter messages that are relevant for notification
+                                relevant_msgs = []
+                                for msg in messages:
+                                    sender = msg.get("username", "Unknown")
+                                    if sender != "Unknown":
+                                        self.update_known_users([sender])
+
+                                    if sender == self.username:
+                                        continue
+                                        
+                                    text = msg.get("message", "")
+                                    recipients = msg.get("recipients", [])
+                                    is_silent = msg.get("is_silent", False)
+
+                                    # Visibility check for notification
+                                    if is_silent and self.username not in recipients:
+                                        continue
+                                    
+                                    # Add to potential notifications
+                                    relevant_msgs.append((sender, text))
+
+                                # Notify only ONCE per batch if there are relevant messages
+                                if relevant_msgs:
+                                    # Prioritize the LATEST message (messages[0] is newest)
+                                    last_sender, last_text = relevant_msgs[0]
+                                    
+                                    # Check for mentions in ANY of the messages to upscale the alert
+                                    is_mention = False
+                                    notif_title = "Redis Chat"
+                                    
+                                    # Scan for high priority alerts
+                                    for s, t in relevant_msgs:
+                                        if "@everyone" in t:
+                                            notif_title = "📢 @everyone Mentioned!"
+                                            is_mention = True
+                                            break
+                                        if f"@{self.username}" in t:
+                                            notif_title = "🔔 You were mentioned!"
+                                            is_mention = True
+                                            break
+                                    
+                                    if not is_mention:
+                                        notif_title = f"New message from {last_sender}"
+
+                                    try:
+                                        notification.notify(
+                                            title=notif_title,
+                                            message=f"{last_sender}: {last_text}",
+                                            app_name="Redis Chat CLI",
+                                            timeout=5
+                                        )
+                                    except Exception:
+                                        pass
+                                        
                             for msg in messages:
                                 self.display_message(msg)
-                            print(PRIMARY_COLOR + ">>> ", end="", flush=True)
+                            
+                            # If NOT using prompt_toolkit, we need to manually restore prompt.
+                            # If using prompt_toolkit + patch_stdout, the prompt is restored automatically.
+                            if not PROMPT_TOOLKIT_AVAILABLE:
+                                print(PRIMARY_COLOR + ">>> ", end="", flush=True)
                         
-                        last_count = current_count
+                        self.last_count = current_count
                 
+                # Periodically update user list (every 5 seconds roughly)
+                if int(time.time()) % 5 == 0:
+                     users_resp = self.redis_request("SMEMBERS", [USERS_KEY])
+                     if users_resp and users_resp.get("result"):
+                         self.update_known_users(users_resp["result"])
+
                 time.sleep(1)  # Check for new messages every second
             except Exception as e:
                 print(PRIMARY_COLOR + f"Stream error: {e}")
@@ -159,6 +399,8 @@ class RedisChat:
             username = input(PRIMARY_COLOR + "Enter your username: ").strip()
             if username and len(username) <= 20:
                 self.username = username
+                self.register_user() # Register in Redis
+                self.update_known_users([username])
                 print(PRIMARY_COLOR + f"Welcome, {USERNAME_COLOR}{username}{PRIMARY_COLOR}!")
                 break
             else:
@@ -170,17 +412,66 @@ class RedisChat:
         print(PRIMARY_COLOR + "Commands:")
         print(PRIMARY_COLOR + "="*60)
         print(f"{PRIMARY_COLOR}/history  - Show chat history")
+        print(f"{PRIMARY_COLOR}/gemini   - Switch to Gemini AI CLI")
         print(f"{PRIMARY_COLOR}/help     - Show this help menu")
         print(f"{PRIMARY_COLOR}/quit     - Exit the chat")
+        print(f"{PRIMARY_COLOR}@user /silent [msg] - Send private message")
         print(f"{PRIMARY_COLOR}Any text   - Send a message")
         print(PRIMARY_COLOR + "="*60 + "\n")
+
+    def start_gemini_cli(self):
+        """Start interactive Gemini CLI session"""
+        if not GEMINI_AVAILABLE:
+            print(PRIMARY_COLOR + "Error: google-generativeai package not installed")
+            return
+        if not GEMINI_API_KEY:
+            print(PRIMARY_COLOR + "Error: GEMINI_API_KEY not found in .env")
+            return
+
+        print(PRIMARY_COLOR + "\n" + "="*60)
+        print(PRIMARY_COLOR + "Entered Gemini AI CLI Mode")
+        print(PRIMARY_COLOR + "Type your prompt or /exit to return to chat")
+        print(PRIMARY_COLOR + "="*60 + "\n")
+
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        chat_session = model.start_chat(history=[])
+
+        while True:
+            try:
+                user_input = input(Fore.CYAN + "Gemini > " + Style.RESET_ALL).strip()
+                
+                if not user_input:
+                    continue
+                
+                if user_input.lower() == "/exit":
+                    print(PRIMARY_COLOR + "Exiting Gemini Mode...\n")
+                    break
+                
+                print(Fore.YELLOW + "Thinking...", end="\r")
+                try:
+                    response = chat_session.send_message(user_input)
+                    print(" " * 20, end="\r") # Clear 'Thinking...'
+                    print(Fore.WHITE + response.text + "\n")
+                except Exception as e:
+                    print(Fore.RED + f"\nError from Gemini: {e}\n")
+                    
+            except KeyboardInterrupt:
+                print("\nReturning to main chat...")
+                break
     
     def run(self):
         """Main chat loop"""
-        print(PRIMARY_COLOR + "="*60)
         print(PRIMARY_COLOR + "Welcome to Redis Chat CLI!")
         print(PRIMARY_COLOR + "="*60 + "\n")
         
+        # Initialize last_count BEFORE starting thread/loop
+        # Fetch current message count so we don't alert on old history
+        try:
+             result = self.redis_request("LLEN", [CHAT_KEY])
+             self.last_count = result["result"] if (result and result.get("result")) else 0
+        except:
+             self.last_count = 0
+
         self.get_username()
         self.start_stream_thread()
         self.show_history()
@@ -188,10 +479,25 @@ class RedisChat:
         
         print(PRIMARY_COLOR + "Connected! Type your message or /help for commands\n")
         
+        if PROMPT_TOOLKIT_AVAILABLE:
+            # Setup prompt session with autocomplete
+            style = PromptStyle.from_dict({
+                'prompt': '#00ff00 bold',
+                'mention': '#ffff00',
+            })
+            session = PromptSession(
+                completer=UserCompleter(self.get_known_users),
+                style=style
+            )
+
         try:
             while self.running:
                 try:
-                    message = input(PRIMARY_COLOR + ">>> ").strip()
+                    if PROMPT_TOOLKIT_AVAILABLE:
+                        with patch_stdout():
+                            message = session.prompt(">>> ").strip()
+                    else:
+                        message = input(PRIMARY_COLOR + ">>> ").strip()
                     
                     if not message:
                         continue
@@ -204,6 +510,8 @@ class RedisChat:
                         self.show_help()
                     elif message.lower() == "/history":
                         self.show_history()
+                    elif message.lower() == "/gemini":
+                        self.start_gemini_cli()
                     else:
                         self.send_message(message)
                 
