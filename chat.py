@@ -433,7 +433,7 @@ class RedisChat:
         print(PRIMARY_COLOR + "Type your prompt or /exit to return to chat")
         print(PRIMARY_COLOR + "="*60 + "\n")
 
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         chat_session = model.start_chat(history=[])
 
         while True:
