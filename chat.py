@@ -39,6 +39,8 @@ except ImportError:
 
 
 try:
+    import warnings
+    warnings.simplefilter("ignore", category=FutureWarning)
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
 except ImportError:
@@ -540,7 +542,7 @@ class RedisChat:
             try:
                 with open("banner.txt", "r", encoding="utf-8") as f:
                     banner = f.read()
-                print(Fore.CYAN + banner)
+                print(Fore.MAGENTA + banner)
             except:
                 pass
         
