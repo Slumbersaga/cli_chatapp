@@ -125,8 +125,29 @@ class RedisChat:
         self.active_user_count = 1
         
         # Try to load Gemini Key from Redis if not in Env
+        # Try to load Gemini Key from Redis if not in Env
         if not GEMINI_API_KEY and GEMINI_AVAILABLE:
-            self.fetch_gemini_key_from_redis()
+            print(PRIMARY_COLOR + "\nNo local Gemini API Key found.")
+            user_key = input(PRIMARY_COLOR + "Enter your Gemini API Key directly (or press Enter to use the Shared System Key): ").strip()
+            
+            if user_key and len(user_key) > 10:
+                global GEMINI_API_KEY
+                GEMINI_API_KEY = user_key
+                genai.configure(api_key=GEMINI_API_KEY)
+                print(PRIMARY_COLOR + "✓ Using provided API Key")
+                
+                # Optional: Offer to save to .env
+                save_env = input(PRIMARY_COLOR + "Save this key to .env for future use? (y/n): ").strip().lower()
+                if save_env == 'y':
+                    try:
+                        with open('.env', 'a') as f:
+                            f.write(f'\nGEMINI_API_KEY="{user_key}"')
+                        print(PRIMARY_COLOR + "✓ Saved to .env")
+                    except:
+                        pass
+            else:
+                 print(PRIMARY_COLOR + "⚠ No key provided. Attempting to fetch Shared System Key...")
+                 self.fetch_gemini_key_from_redis()
             
     def fetch_gemini_key_from_redis(self):
         """Fetch Gemini API key from Redis shared storage"""
