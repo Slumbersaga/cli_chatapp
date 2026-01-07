@@ -549,7 +549,7 @@ class RedisChat:
             try:
                 with open("banner.txt", "r", encoding="utf-8") as f:
                     banner = f.read()
-                print(Fore.MAGENTA + banner)
+                print(Fore.MAGENTA + Style.BRIGHT + banner)
             except:
                 pass
         
