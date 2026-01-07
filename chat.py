@@ -357,23 +357,39 @@ class RedisChat:
         print(PRIMARY_COLOR + "="*60 + "\n")
     
     def stream_updates(self):
-        """Background thread to check for new messages"""
-        # self.last_count is now initialized in run()
-        pass
+        """Background thread to check for new messages and update presence"""
+        ONLINE_USERS_KEY = "chat:online_users_zset"
         
         while self.running:
             try:
+                # 1. HEARTBEAT & PRESENCE
+                now = int(time.time())
+                
+                # Pipeline-like execution (manually chained for REST API simplicity)
+                # A. Heartbeat: Update my score to current time
+                if self.username:
+                    self.redis_request("ZADD", [ONLINE_USERS_KEY, str(now), self.username])
+                
+                # B. Cleanup: Remove users inactive for > 15 seconds
+                cutoff = now - 15
+                self.redis_request("ZREMRANGEBYSCORE", [ONLINE_USERS_KEY, "-inf", str(cutoff)])
+                
+                # C. Fetch online count & users
+                card_response = self.redis_request("ZCARD", [ONLINE_USERS_KEY])
+                if card_response and "result" in card_response:
+                     self.active_user_count = card_response["result"]
+                     
+                # Update known users for autocomplete (optional: fetch actual list)
+                # users_response = self.redis_request("ZRANGE", [ONLINE_USERS_KEY, 0, -1])
+                # if users_response and "result" in users_response:
+                #      self.update_known_users(users_response["result"])
+
+                # 2. MESSAGES
                 result = self.redis_request("LLEN", [CHAT_KEY])
                 
                 if result and result.get("result") is not None:
                     current_count = result["result"]
                     
-                    # If this is the first run loop, just sync the count and don't fetch/notify
-                    # BUT handling this in run() is safer. If we still rely on local last_count=0 
-                    # there is a race if run() logic fails.
-                    # We will assume self.last_count is initialized in run().
-                    
-                    # If new messages arrived, show them
                     if current_count > self.last_count:
                         new_messages_count = current_count - self.last_count
                         messages = self.get_message_history(new_messages_count)
@@ -444,23 +460,14 @@ class RedisChat:
                             for msg in messages:
                                 self.display_message(msg)
                             
-                            # If NOT using prompt_toolkit, we need to manually restore prompt.
-                            # If using prompt_toolkit + patch_stdout, the prompt is restored automatically.
-                            if not PROMPT_TOOLKIT_AVAILABLE:
-                                print(PRIMARY_COLOR + f"({self.active_user_count} Online) >>> ", end="", flush=True)
+                            # Refresh prompt (Visual only)
+                            # Logic handled by loop below
                         
                         self.last_count = current_count
                 
-                # Periodically update user list (every 5 seconds roughly)
-                if int(time.time()) % 5 == 0:
-                     users_resp = self.redis_request("SMEMBERS", [USERS_KEY])
-                     if users_resp and users_resp.get("result"):
-                         self.update_known_users(users_resp["result"])
-                         self.active_user_count = len(users_resp["result"])
-
                 time.sleep(1)  # Check for new messages every second
             except Exception as e:
-                print(PRIMARY_COLOR + f"Stream error: {e}")
+                # print(PRIMARY_COLOR + f"Stream error: {e}") # Suppress noise
                 time.sleep(2)
     
     def start_stream_thread(self):
@@ -578,11 +585,17 @@ class RedisChat:
         try:
             while self.running:
                 try:
+                    # Dynamic colorful prompt
+                    prompt_str = f"{Fore.CYAN}[{Fore.GREEN}Live:{Fore.YELLOW}{self.active_user_count}{Fore.CYAN}] {Fore.GREEN}>>> {Style.RESET_ALL}"
+                    
                     if PROMPT_TOOLKIT_AVAILABLE:
+                        # prompt_toolkit handles ANSI codes when wrapped in ANSI()
+                        # But session.prompt takes a string or formatted text.
+                        # Simple string with ANSI codes often works in terminal.
                         with patch_stdout():
-                            message = session.prompt(f"({self.active_user_count} Online) >>> ").strip()
+                             message = session.prompt(ANSI(prompt_str)).strip()
                     else:
-                        message = input(PRIMARY_COLOR + f"({self.active_user_count} Online) >>> ").strip()
+                        message = input(prompt_str).strip()
                     
                     if not message:
                         continue
