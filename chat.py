@@ -12,6 +12,72 @@ from dotenv import load_dotenv
 from colorama import Fore, Style, init
 import ctypes
 import platform
+import random
+import sys
+
+class Effects:
+    @staticmethod
+    def typewriter(text, speed=0.03, color=Fore.GREEN):
+        """Print text character by character"""
+        for char in text:
+            sys.stdout.write(color + char)
+            sys.stdout.flush()
+            time.sleep(speed)
+        print() # Newline at end
+
+    @staticmethod
+    def matrix_glitch(banner_text, duration=1.5):
+        """Simulate a CRT scanline or glitch effect on the banner"""
+        lines = banner_text.split('\n')
+        end_time = time.time() + duration
+        
+        while time.time() < end_time:
+            # Clear screen (cursor home)
+            print('\033[H', end='')
+            
+            # Random bright scanline position
+            scanline = random.randint(0, len(lines)-1)
+            
+            for i, line in enumerate(lines):
+                if i == scanline:
+                    # Bright white line for scanline effect
+                    print(Fore.WHITE + Style.BRIGHT + line + Style.RESET_ALL)
+                else:
+                    # Normal purple for rest
+                    # Occasionally glitch a character
+                    if random.random() < 0.02:
+                        glitched = list(line)
+                        if glitched:
+                            idx = random.randint(0, len(glitched)-1)
+                            glitched[idx] = random.choice(['#', '$', '%', '&', '0', '1'])
+                            print(Fore.MAGENTA + Style.DIM + "".join(glitched) + Style.RESET_ALL)
+                        else:
+                            print(Fore.MAGENTA + Style.DIM + line + Style.RESET_ALL)
+                    else:
+                        print(Fore.MAGENTA + Style.NORMAL + line + Style.RESET_ALL)
+            
+            time.sleep(0.05)
+        
+        # Final clean render
+        print('\033[H', end='')
+        print(Fore.MAGENTA + Style.BRIGHT + banner_text + Style.RESET_ALL)
+
+    @staticmethod
+    def spinner(text, duration=2.0):
+        """Show animated spinner"""
+        chars = "|/-\\"
+        end_time = time.time() + duration
+        i = 0
+        while time.time() < end_time:
+            time.sleep(0.1)
+            # \r to return to start of line
+            sys.stdout.write(f"\r{Fore.MAGENTA}{chars[i % 4]} {Fore.GREEN}{text}")
+            sys.stdout.flush()
+            i += 1
+        # Clear spinner line
+        sys.stdout.write(f"\r{Fore.GREEN}✓ {text}          \n")
+        sys.stdout.flush()
+
 
 def enable_vt_processing():
     """Enable VT100 emulation on Windows"""
@@ -56,7 +122,34 @@ try:
     from prompt_toolkit.styles import Style as PromptStyle
     from prompt_toolkit import print_formatted_text
     from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.lexers import Lexer
     PROMPT_TOOLKIT_AVAILABLE = True
+
+    class CommandLexer(Lexer):
+        def lex_document(self, document):
+            def get_line_tokens(lineno):
+                line = document.lines[lineno]
+                tokens = []
+                # Simple tokenization by splitting on space to find commands
+                # This is a basic implementation
+                parts = line.split(' ')
+                current_len = 0
+                
+                for i, part in enumerate(parts):
+                    if part.startswith('/'):
+                        tokens.append(('class:command', part))
+                    elif part.startswith('@'):
+                        tokens.append(('class:mention', part))
+                    else:
+                        tokens.append(('class:text', part))
+                    
+                    # Add space if not the last part
+                    if i < len(parts) - 1:
+                        tokens.append(('', ' '))
+                
+                return tokens
+            return get_line_tokens
+
 except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
@@ -490,16 +583,19 @@ class RedisChat:
     
     def show_help(self):
         """Display help menu"""
+        CMD = Fore.MAGENTA
+        DESC = PRIMARY_COLOR
+        
         print(PRIMARY_COLOR + "\n" + "="*60)
         print(PRIMARY_COLOR + "Commands:")
         print(PRIMARY_COLOR + "="*60)
-        print(f"{PRIMARY_COLOR}/history  - Show chat history")
-        print(f"{PRIMARY_COLOR}/gemini   - Switch to Gemini AI CLI")
-        print(f"{PRIMARY_COLOR}/help     - Show this help menu")
-        print(f"{PRIMARY_COLOR}/quit     - Exit the chat")
-        print(f"{PRIMARY_COLOR}/set_gemini_key [key] - Securely sync API key with friends")
-        print(f"{PRIMARY_COLOR}@user /silent [msg] - Send private message")
-        print(f"{PRIMARY_COLOR}Any text   - Send a message")
+        print(f"{CMD}/history{DESC}  - Show chat history")
+        print(f"{CMD}/gemini{DESC}   - Switch to Gemini AI CLI")
+        print(f"{CMD}/help{DESC}     - Show this help menu")
+        print(f"{CMD}/quit{DESC}     - Exit the chat")
+        print(f"{CMD}/set_gemini_key [key]{DESC} - Securely sync API key with friends")
+        print(f"{Fore.YELLOW}@user {CMD}/silent [msg]{DESC} - Send private message")
+        print(f"{DESC}Any text   - Send a message")
         print(PRIMARY_COLOR + "="*60 + "\n")
 
     def start_gemini_cli(self):
@@ -512,8 +608,8 @@ class RedisChat:
             return
 
         print(PRIMARY_COLOR + "\n" + "="*60)
-        print(PRIMARY_COLOR + "Entered Gemini AI CLI Mode")
-        print(PRIMARY_COLOR + "Type your prompt or /exit to return to chat")
+        print(Effects.typewriter("Entered Gemini AI CLI Mode", color=Fore.MAGENTA))
+        print(PRIMARY_COLOR + "Type your prompt or " + Fore.MAGENTA + "/exit" + PRIMARY_COLOR + " to return to chat")
         print(PRIMARY_COLOR + "="*60 + "\n")
 
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -530,10 +626,15 @@ class RedisChat:
                     print(PRIMARY_COLOR + "Exiting Gemini Mode...\n")
                     break
                 
-                print(Fore.YELLOW + "Thinking...", end="\r")
+                # Use Spinner for thinking
+                Effects.spinner("Thinking...", duration=0.5) 
+                
                 try:
+                    # We print over the spinner line or just after
+                    # The spinner ends with a newline, so we are good
+                    print(Fore.YELLOW + "Generating response...", end="\r")
                     response = chat_session.send_message(user_input)
-                    print(" " * 20, end="\r") # Clear 'Thinking...'
+                    print(" " * 30, end="\r") # Clear 
                     print(Fore.WHITE + response.text + "\n")
                 except Exception as e:
                     print(Fore.RED + f"\nError from Gemini: {e}\n")
@@ -544,16 +645,24 @@ class RedisChat:
     
     def run(self):
         """Main chat loop"""
-        # Display Banner
+        # Display Banner with fancy effects
         if os.path.exists("banner.txt"):
             try:
                 with open("banner.txt", "r", encoding="utf-8") as f:
                     banner = f.read()
-                print(Fore.MAGENTA + Style.BRIGHT + banner)
+                
+                # Clear screen initially
+                os.system('cls' if os.name == 'nt' else 'clear')
+                
+                # Run the Glitch/Scanline effect
+                Effects.matrix_glitch(banner)
+                
             except:
                 pass
         
-        print(PRIMARY_COLOR + "Welcome to Redis Chat CLI!")
+        print("\n") # Spacer
+        Effects.typewriter("Welcome to Redis Chat CLI...", speed=0.03, color=Fore.GREEN)
+        Effects.spinner("Initializing secure connection...", duration=1.5)
         print(PRIMARY_COLOR + "="*60 + "\n")
         
         # Initialize last_count BEFORE starting thread/loop
@@ -569,33 +678,37 @@ class RedisChat:
         self.show_history()
         self.show_help()
         
-        print(PRIMARY_COLOR + "Connected! Type your message or /help for commands\n")
+        print(PRIMARY_COLOR + "Connected! Type your message or " + Fore.MAGENTA + "/help" + PRIMARY_COLOR + " for commands\n")
         
         if PROMPT_TOOLKIT_AVAILABLE:
-            # Setup prompt session with autocomplete
+            # Setup prompt session with autocomplete AND custom lexer for colors
             style = PromptStyle.from_dict({
                 'prompt': '#00ff00 bold',
                 'mention': '#ffff00',
+                'command': '#ff00ff', # Magenta for commands
+                'text': '#ffffff',
             })
             session = PromptSession(
                 completer=UserCompleter(self.get_known_users),
-                style=style
+                style=style,
+                lexer=CommandLexer()
             )
 
         try:
             while self.running:
                 try:
                     # Dynamic colorful prompt
-                    prompt_str = f"{Fore.CYAN}[{Fore.GREEN}Live:{Fore.YELLOW}{self.active_user_count}{Fore.CYAN}] {Fore.GREEN}>>> {Style.RESET_ALL}"
+                    prompt_str = f"[{self.active_user_count}] >>> "
+                    # We'll rely on our custom style for the prompt if possible, or just pass simple ANSI
+                    # For simplicity with current setup, we keep the ANSI prompt but use lexer for input
+                    
+                    ansi_prompt = f"{Fore.CYAN}[{Fore.GREEN}Live:{Fore.YELLOW}{self.active_user_count}{Fore.CYAN}] {Fore.GREEN}>>> {Style.RESET_ALL}"
                     
                     if PROMPT_TOOLKIT_AVAILABLE:
-                        # prompt_toolkit handles ANSI codes when wrapped in ANSI()
-                        # But session.prompt takes a string or formatted text.
-                        # Simple string with ANSI codes often works in terminal.
-                        with patch_stdout():
-                             message = session.prompt(ANSI(prompt_str)).strip()
+                         # session.prompt handles the input highlighting via lexer
+                         message = session.prompt(ANSI(ansi_prompt)).strip()
                     else:
-                        message = input(prompt_str).strip()
+                        message = input(ansi_prompt).strip()
                     
                     if not message:
                         continue

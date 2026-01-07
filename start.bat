@@ -34,7 +34,8 @@ if errorlevel 1 (
 )
 
 echo Starting Redis Chat...
-echo.
+timeout /t 2 >nul
+cls
 python chat.py
 
 pause
