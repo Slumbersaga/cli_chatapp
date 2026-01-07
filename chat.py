@@ -536,6 +536,15 @@ class RedisChat:
     
     def run(self):
         """Main chat loop"""
+        # Display Banner
+        if os.path.exists("banner.txt"):
+            try:
+                with open("banner.txt", "r", encoding="utf-8") as f:
+                    banner = f.read()
+                print(Fore.CYAN + banner)
+            except:
+                pass
+        
         print(PRIMARY_COLOR + "Welcome to Redis Chat CLI!")
         print(PRIMARY_COLOR + "="*60 + "\n")
         
