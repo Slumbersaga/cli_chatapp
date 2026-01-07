@@ -24,6 +24,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Checking dependencies...
+python -c "import requests, dotenv, colorama, plyer, google.generativeai, prompt_toolkit" >nul 2>&1
+if errorlevel 1 (
+    echo Installing missing dependencies...
+    pip install -r requirements.txt
+) else (
+    echo Dependencies are OK.
+)
+
 echo Starting Redis Chat...
 echo.
 python chat.py
