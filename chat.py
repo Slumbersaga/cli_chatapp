@@ -163,9 +163,6 @@ load_dotenv()
 # Redis Configuration (Loaded from .env)
 REDIS_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY and "paste_your_gemini_api_key" in GEMINI_API_KEY:
-    GEMINI_API_KEY = None
 
 # Simple color theme
 PRIMARY_COLOR = Fore.GREEN
@@ -183,7 +180,8 @@ if not REDIS_URL or not REDIS_TOKEN:
 
 CHAT_KEY = "chat:messages"
 USERS_KEY = "chat:users"
-CONFIG_GEMINI_KEY = "chat:config:gemini_key"
+GEMINI_QUEUE_KEY = "chat:gemini:queue"
+GEMINI_RESPONSE_KEY = "chat:gemini:response:{}"
 
 # Custom Completer for @mentions
 class UserCompleter(Completer):
@@ -218,72 +216,7 @@ class RedisChat:
         self.known_users = set()
         self.users_lock = threading.Lock()
         self.active_user_count = 1
-        
-        # Try to load Gemini Key from Redis if not in Env
-        global GEMINI_API_KEY
-        if not GEMINI_API_KEY and GEMINI_AVAILABLE:
-            print(PRIMARY_COLOR + "\nNo local Gemini API Key found.")
-            user_key = input(PRIMARY_COLOR + "Enter your Gemini API Key directly (or press Enter to use the Shared System Key): ").strip()
             
-            if user_key and len(user_key) > 10:
-                GEMINI_API_KEY = user_key
-                genai.configure(api_key=GEMINI_API_KEY)
-                print(PRIMARY_COLOR + "✓ Using provided API Key")
-                
-                # Optional: Offer to save to .env
-                save_env = input(PRIMARY_COLOR + "Save this key to .env for future use? (y/n): ").strip().lower()
-                if save_env == 'y':
-                    try:
-                        with open('.env', 'a') as f:
-                            f.write(f'\nGEMINI_API_KEY="{user_key}"')
-                        print(PRIMARY_COLOR + "✓ Saved to .env")
-                    except:
-                        pass
-            else:
-                 print(PRIMARY_COLOR + "⚠ No key provided. Attempting to fetch Shared System Key...")
-                 self.fetch_gemini_key_from_redis()
-            
-    def fetch_gemini_key_from_redis(self):
-        """Fetch Gemini API key from Redis shared storage"""
-        print(PRIMARY_COLOR + "Checking Redis for shared Gemini API key...")
-        global GEMINI_API_KEY
-        key = None
-        
-        try:
-            response = self.redis_request("GET", [CONFIG_GEMINI_KEY])
-            if response and response.get("result"):
-                key = response["result"]
-                print(PRIMARY_COLOR + "✓ Loaded Gemini API Key from sync storage")
-            else:
-                print(ERROR_COLOR + "⚠ No Gemini API Key found in shared storage.")
-                print(ERROR_COLOR + "  Use /set_gemini_key <key> to configure it for everyone.")
-        except Exception as e:
-            print(ERROR_COLOR + f"Failed to fetch key from Redis: {e}")
-
-        if key:
-            try:
-                genai.configure(api_key=key)
-                GEMINI_API_KEY = key
-            except Exception as e:
-                print(ERROR_COLOR + f"Failed to configure Gemini: {e}")
-
-    def set_gemini_key_in_redis(self, key):
-        """Securely save Gemini API key to Redis"""
-        if not key.strip():
-            print(ERROR_COLOR + "Invalid key")
-            return
-        
-        try:
-            self.redis_request("SET", [CONFIG_GEMINI_KEY, key])
-            print(PRIMARY_COLOR + "✓ Gemini API Key saved to shared storage! Friends can now use it.")
-            # Also configure locally
-            genai.configure(api_key=key)
-            global GEMINI_API_KEY
-            GEMINI_API_KEY = key
-        except Exception as e:
-             print(ERROR_COLOR + f"Failed to save key: {e}")
-
-        
     def update_known_users(self, users_list=None):
         if users_list:
             with self.users_lock:
@@ -452,32 +385,27 @@ class RedisChat:
     def stream_updates(self):
         """Background thread to check for new messages and update presence"""
         ONLINE_USERS_KEY = "chat:online_users_zset"
+        last_heartbeat = 0
+        last_cleanup = 0
+        heartbeat_interval = 20  # Send heartbeat every 20 seconds (was: every 1 second via message polling)
+        cleanup_interval = 60    # Cleanup stale users every 60 seconds (was: every 1 second)
         
         while self.running:
             try:
-                # 1. HEARTBEAT & PRESENCE
                 now = int(time.time())
                 
-                # Pipeline-like execution (manually chained for REST API simplicity)
-                # A. Heartbeat: Update my score to current time
-                if self.username:
+                # 1. HEARTBEAT - Only every 20 seconds
+                if self.username and (now - last_heartbeat) >= heartbeat_interval:
                     self.redis_request("ZADD", [ONLINE_USERS_KEY, str(now), self.username])
+                    last_heartbeat = now
                 
-                # B. Cleanup: Remove users inactive for > 15 seconds
-                cutoff = now - 15
-                self.redis_request("ZREMRANGEBYSCORE", [ONLINE_USERS_KEY, "-inf", str(cutoff)])
-                
-                # C. Fetch online count & users
-                card_response = self.redis_request("ZCARD", [ONLINE_USERS_KEY])
-                if card_response and "result" in card_response:
-                     self.active_user_count = card_response["result"]
-                     
-                # Update known users for autocomplete (optional: fetch actual list)
-                # users_response = self.redis_request("ZRANGE", [ONLINE_USERS_KEY, 0, -1])
-                # if users_response and "result" in users_response:
-                #      self.update_known_users(users_response["result"])
+                # 2. CLEANUP - Only every 60 seconds
+                if (now - last_cleanup) >= cleanup_interval:
+                    cutoff = now - 15
+                    self.redis_request("ZREMRANGEBYSCORE", [ONLINE_USERS_KEY, "-inf", str(cutoff)])
+                    last_cleanup = now
 
-                # 2. MESSAGES
+                # 3. MESSAGE CHECK - Every 2-3 seconds (was: every 1 second)
                 result = self.redis_request("LLEN", [CHAT_KEY])
                 
                 if result and result.get("result") is not None:
@@ -558,7 +486,7 @@ class RedisChat:
                         
                         self.last_count = current_count
                 
-                time.sleep(1)  # Check for new messages every second
+                time.sleep(2)  # Check for new messages every 2 seconds (reduced from 1s)
             except Exception as e:
                 # print(PRIMARY_COLOR + f"Stream error: {e}") # Suppress noise
                 time.sleep(2)
@@ -590,30 +518,20 @@ class RedisChat:
         print(PRIMARY_COLOR + "Commands:")
         print(PRIMARY_COLOR + "="*60)
         print(f"{CMD}/history{DESC}  - Show chat history")
-        print(f"{CMD}/gemini{DESC}   - Switch to Gemini AI CLI")
+        print(f"{CMD}/gemini{DESC}   - Switch to Gemini AI CLI (Redis backend)")
         print(f"{CMD}/help{DESC}     - Show this help menu")
         print(f"{CMD}/quit{DESC}     - Exit the chat")
-        print(f"{CMD}/set_gemini_key [key]{DESC} - Securely sync API key with friends")
         print(f"{Fore.YELLOW}@user {CMD}/silent [msg]{DESC} - Send private message")
         print(f"{DESC}Any text   - Send a message")
         print(PRIMARY_COLOR + "="*60 + "\n")
 
     def start_gemini_cli(self):
-        """Start interactive Gemini CLI session"""
-        if not GEMINI_AVAILABLE:
-            print(PRIMARY_COLOR + "Error: google-generativeai package not installed")
-            return
-        if not GEMINI_API_KEY:
-            print(PRIMARY_COLOR + "Error: GEMINI_API_KEY not found in .env")
-            return
-
+        """Start interactive Gemini CLI session via Redis backend"""
         print(PRIMARY_COLOR + "\n" + "="*60)
         print(Effects.typewriter("Entered Gemini AI CLI Mode", color=Fore.MAGENTA))
         print(PRIMARY_COLOR + "Type your prompt or " + Fore.MAGENTA + "/exit" + PRIMARY_COLOR + " to return to chat")
+        print(PRIMARY_COLOR + "(Powered by Redis backend)")
         print(PRIMARY_COLOR + "="*60 + "\n")
-
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        chat_session = model.start_chat(history=[])
 
         while True:
             try:
@@ -627,17 +545,43 @@ class RedisChat:
                     break
                 
                 # Use Spinner for thinking
-                Effects.spinner("Thinking...", duration=0.5) 
+                Effects.spinner("Sending to backend...", duration=0.5)
                 
                 try:
-                    # We print over the spinner line or just after
-                    # The spinner ends with a newline, so we are good
-                    print(Fore.YELLOW + "Generating response...", end="\r")
-                    response = chat_session.send_message(user_input)
-                    print(" " * 30, end="\r") # Clear 
-                    print(Fore.WHITE + response.text + "\n")
+                    # Push prompt to Redis queue
+                    prompt_id = f"{self.username}_{int(time.time() * 1000)}"
+                    self.redis_request("RPUSH", [GEMINI_QUEUE_KEY, json.dumps({
+                        "id": prompt_id,
+                        "user": self.username,
+                        "prompt": user_input,
+                        "timestamp": datetime.now().isoformat()
+                    })])
+                    
+                    # Poll for response with timeout
+                    response_key = GEMINI_RESPONSE_KEY.format(prompt_id)
+                    max_wait = 30  # 30 seconds
+                    waited = 0
+                    
+                    while waited < max_wait:
+                        response = self.redis_request("GET", [response_key])
+                        if response and response.get("result"):
+                            result_data = json.loads(response["result"])
+                            if "error" in result_data:
+                                print(Fore.RED + f"\nError from backend: {result_data['error']}\n")
+                            else:
+                                print(Fore.WHITE + result_data.get("response", "No response") + "\n")
+                            # Clean up response key
+                            self.redis_request("DEL", [response_key])
+                            break
+                        
+                        time.sleep(0.5)
+                        waited += 0.5
+                    
+                    if waited >= max_wait:
+                        print(Fore.YELLOW + "\nTimeout waiting for backend response (>30s)\n")
+                        
                 except Exception as e:
-                    print(Fore.RED + f"\nError from Gemini: {e}\n")
+                    print(Fore.RED + f"\nError: {e}\n")
                     
             except KeyboardInterrupt:
                 print("\nReturning to main chat...")
@@ -723,12 +667,6 @@ class RedisChat:
                         self.show_history()
                     elif message.lower() == "/gemini":
                         self.start_gemini_cli()
-                    elif message.lower().startswith("/set_gemini_key"):
-                        parts = message.split(' ')
-                        if len(parts) > 1:
-                            self.set_gemini_key_in_redis(parts[1])
-                        else:
-                            print(ERROR_COLOR + "Usage: /set_gemini_key <your_api_key>")
                     else:
                         self.send_message(message)
                 
