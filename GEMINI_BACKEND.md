@@ -51,13 +51,6 @@ Your backend service should:
    ```
 4. Store in: `chat:gemini:response:{prompt_id}` with any reasonable TTL (e.g., 60 seconds)
 
-## Example Backend (Node.js/Python)
-
-You'll need to create a separate service that:
-- Connects to Redis
-- Uses `BLPOP` or similar to listen for prompts
-- Calls Gemini API with the prompt
-- Stores responses back in Redis with the matching ID
 
 ## No Local Keys
 
